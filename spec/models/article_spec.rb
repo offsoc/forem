@@ -82,13 +82,15 @@ RSpec.describe Article do
     end
 
     describe ".from_subforem" do
-      let(:subforem) { create(:subforem, domain: "#{rand(1000)}.com") }
-      let(:second_subforem) { create(:subforem, domain: "#{rand(1000)}.com") }
-      let(:third_subforem) { create(:subforem, domain: "#{rand(1000)}.com") }
+      let(:subforem) { create(:subforem, domain: "#{rand(1000)}.com", discoverable: true) }
+      let(:second_subforem) { create(:subforem, domain: "#{rand(1000)}.com", discoverable: true) }
+      let(:third_subforem) { create(:subforem, domain: "#{rand(1000)}.com", discoverable: true) }
+      let(:non_discoverable_subforem) { create(:subforem, domain: "#{rand(1000)}.com", discoverable: false) }
       let!(:article_in_subforem) { create(:article, subforem_id: subforem.id) }
       let!(:article_in_second_subforem) { create(:article, subforem_id: second_subforem.id) }
       let!(:article_in_null_subforem) { create(:article, subforem_id: nil) }
       let!(:article_in_other_subforem) { create(:article, subforem_id: third_subforem.id) }
+      let!(:article_in_nondiscoverable_subforem) { create(:article, subforem_id: non_discoverable_subforem.id) }
 
       after do
         RequestStore.store[:subforem_id] = nil
@@ -140,14 +142,10 @@ RSpec.describe Article do
           RequestStore.store[:root_subforem_id] = subforem.id
         end
     
-        it "returns all articles with no conditions" do
-          expect(described_class.from_subforem(subforem.id)).to contain_exactly(
-            article,
-            article_in_subforem,
-            article_in_second_subforem,
-            article_in_null_subforem,
-            article_in_other_subforem,
-          )
+        it "articles with no subforem or subforem_id in Subforem.cached_discoverable_ids" do
+          expect(described_class.from_subforem(subforem.id)).to include(article_in_null_subforem)
+          expect(described_class.from_subforem(subforem.id)).to include(article_in_subforem)
+          expect(described_class.from_subforem(subforem.id)).not_to include(article_in_nondiscoverable_subforem)
         end
 
         it "returns proper query with additional conditions" do
@@ -346,7 +344,40 @@ RSpec.describe Article do
           end
         end
       end
-    end  
+    end
+
+    describe "#restrict_type_based_on_role" do
+      context "when user is an admin" do
+        before { article.user.add_role(:admin) }
+        it "allows setting type_of to 'fullscreen_embed'" do
+          article.type_of = "fullscreen_embed"
+          expect(article).to be_valid
+        end
+        it "allows setting type_of to 'status'" do
+          article.type_of = "status"
+          expect(article).to be_valid
+        end
+        it "allows setting type_of to 'full_post'" do
+          article.type_of = "full_post"
+          expect(article).to be_valid
+        end
+      end
+      context "when user is not an admin" do
+        before { article.user.remove_role(:admin) }
+        it "does not allow setting type_of to 'fullscreen_embed'" do
+          article.type_of = "fullscreen_embed"
+          expect(article).not_to be_valid
+        end
+        it "allows setting type_of to 'status'" do
+          article.type_of = "status"
+          expect(article).to be_valid
+        end
+        it "allows setting type_of to 'full_post'" do
+          article.type_of = "full_post"
+          expect(article).to be_valid
+        end
+      end
+    end
 
     describe "#main_image_background_hex_color" do
       it "must have true hex for image background" do
@@ -956,6 +987,27 @@ RSpec.describe Article do
     end
   end
 
+  describe "#generate_context_notes" do
+
+    let(:tag) { create(:tag, name: "testtag", context_note_instructions: "context_note_instructions") }
+
+    before do
+      allow(Articles::GenerateContextNoteWorker).to receive(:perform_async)
+    end
+
+    it "calls Articles::GenerateContextNoteWorker.perform_async" do
+      article = create(:article, user: user, tag_list: [tag.name])
+      expect(Articles::GenerateContextNoteWorker).to have_received(:perform_async).with(article.id, tag.id)
+    end
+
+    it "does not call Articles::GenerateContextNoteWorker if no tags with context note instructions are present" do
+      tag.update_column(:context_note_instructions, nil)
+      create(:article, user: user, tag_list: [tag.name])
+      expect(Articles::GenerateContextNoteWorker).not_to have_received(:perform_async)
+    end
+  end
+
+
   describe "#nth_published_by_author" do
     it "does not have a nth_published_by_author if not published" do
       unpublished_article = build(:article, published: false)
@@ -1363,10 +1415,56 @@ RSpec.describe Article do
     end
 
     describe "spam" do
-      it "delegates spam handling to Spam::Handler.handle_article!" do
-        allow(Spam::Handler).to receive(:handle_article!).with(article: article).and_call_original
-        article.save
-        expect(Spam::Handler).to have_received(:handle_article!).with(article: article)
+      it "enqueues Articles::HandleSpamWorker on save" do
+        sidekiq_assert_enqueued_jobs(1, only: Articles::HandleSpamWorker) do
+          article.save
+        end
+      end
+    end
+
+    describe "create conditional autovomits" do
+      let(:worker)  { Articles::HandleSpamWorker }
+      let!(:article) { create(:article, published: true) }
+
+      context "within one minute of publishing" do
+        it "enqueues for body_markdown changes" do
+          sidekiq_assert_enqueued_jobs(1, only: worker) do
+            article.update(body_markdown: "👀 fresh body change")
+          end
+        end
+
+        it "enqueues for any other attribute change" do
+          sidekiq_assert_enqueued_jobs(1, only: worker) do
+            article.update(title: "fresh title tweak")
+          end
+        end
+      end
+
+      context "more than one minute after publishing" do
+        before { article.update_column(:published_at, 2.minutes.ago) }
+
+        it "enqueues for body_markdown changes" do
+          sidekiq_assert_enqueued_jobs(1, only: worker) do
+            article.update(body_markdown: "🚽 delayed body change")
+          end
+        end
+
+        it "does not enqueue for non-body changes" do
+          sidekiq_assert_no_enqueued_jobs(only: worker) do
+            article.update(title: "delayed title tweak")
+          end
+        end
+      end
+
+      context "when the article is not published" do
+        let(:draft) { create(:article, published: false) }
+
+        it "never enqueues" do
+          sidekiq_assert_no_enqueued_jobs(only: worker) do
+            draft.save
+            draft.update(title: "still draft")
+          end
+        end
       end
     end
 
@@ -1760,6 +1858,15 @@ RSpec.describe Article do
         article.update_score
         expect(article.reload.score).to eq(5)
       end
+    end
+  end
+
+  context "when the article has a context note" do
+    it "adds 1 to score" do
+      score = article.score
+      create(:context_note, article: article)
+      article.update_score
+      expect(article.reload.score).to eq(score + 1)
     end
   end
 

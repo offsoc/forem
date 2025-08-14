@@ -28,6 +28,8 @@ module Articles
           .limited_column_select
           .includes(top_comments: :user)
           .includes(:distinct_reaction_categories)
+          .includes(:context_notes)
+          .includes(:subforem)
           .from_subforem
 
         if @user
@@ -35,6 +37,10 @@ module Articles
           if (hidden_tags = @user.cached_antifollowed_tag_names).any?
             articles = articles.not_cached_tagged_with_any(hidden_tags)
           end
+        end
+
+        if RequestStore.store[:subforem_id] == RequestStore.store[:root_subforem_id]
+          articles = articles.where(type_of: :full_post)
         end
 
         articles = weighted_shuffle(articles, @feed_config.shuffle_weight) if @feed_config.shuffle_weight.positive?

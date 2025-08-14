@@ -170,6 +170,7 @@ Rails.application.routes.draw do
       end
     end
     resources :videos, only: %i[index create new]
+    resources :subforems, only: [:index]
     resources :video_states, only: [:create]
     resources :twilio_tokens, only: [:show]
     resources :tag_adjustments, only: %i[create destroy]
@@ -183,6 +184,12 @@ Rails.application.routes.draw do
     resources :reading_list_items, only: [:update]
     resources :poll_votes, only: %i[show create]
     resources :poll_skips, only: [:create]
+
+    resources :surveys, only: [:show] do # Or however you have it configured
+      get :votes, on: :member # This creates the route GET /surveys/:id/votes
+    end
+
+
     resources :profile_pins, only: %i[create update]
     # temporary keeping both routes while transitioning (renaming) display_ads => billboards
     resources :display_ad_events, only: [:create], controller: :billboard_events
@@ -213,6 +220,7 @@ Rails.application.routes.draw do
       member do
         patch :checkbox, defaults: { format: :json }
         patch :notifications, defaults: { format: :json }
+        patch :custom_actions, defaults: { format: :json }
         get :tags, defaults: { format: :json }
         get :users_and_organizations, defaults: { format: :json }
         get :newsletter, defaults: { format: :json }
@@ -394,6 +402,7 @@ Rails.application.routes.draw do
 
 
     get "/t/:tag/edit", to: "tags#edit", as: :edit_tag
+    get "/t/:tag/videos", to: "videos#index"
     get "/t/:tag/admin", to: "tags#admin"
     patch "/tag/:id", to: "tags#update"
 
